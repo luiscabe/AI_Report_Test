@@ -1,187 +1,114 @@
-# 모델 입력 그룹 선별용 LOFO 1-NN regret 평가 — 프로토콜·프로파일 특성 정리
+# MAC_RUNTIME_CPU_OPT — 바이너리 레벨 블록 구조
 
-작성: 2026-11-13 · 성격: 임시 조회 문서(자기 완결 — 외부 문서 참조 없음)
+> 작성일 2026-11-13. 대상: 기지국 MAC 전용(isolated) 코어(1~11)의 CPU prefetcher/L2 설정을
+> 런타임에 자동 선택하는 시스템(MAC_RUNTIME_CPU_OPT). 스냅샷 v3 기준 요약.
 
-## 0. 한 줄 요약
-
-모델 관측 입력 세트(사용률/PMU/SoC 카운터)를 선별하기 위해 "계열 LOFO(Leave-One-Fold-Out,
-폴드=부하 계열) + 1-NN 설정 선택 + regret(%p)" 평가를 사용했다. 프로파일은 2026-11-10
-m33 본수집 DCD ON 3계열(14cell=lte7nr7·16cell=lte8nr8·18cell=lte9nr9) × 21설정
-(한쪽 도메인만 변경하는 단방향 구조)이며, 계열별 최적 설정은 14cell TC_08(LTE 적용) /
-16cell TC_05(NR 적용) / 18cell TC_07(NR 적용)로 부하마다 달랐다. 이 평가에서
-"SoC 카운터 단독 관측(soc7+set, regret 1.279%p)이 사용률 기반(sum+set 1.673·
-usage3+set 1.809%p)보다 우위"라는 결과가 관측 구성에 SoC 카운터를 편입한 근거다.
-
-## 1. 평가의 목적
-
-- 대상: MAC 런타임 CPU 최적화 모델의 관측(모델 입력) 세트 비교 — 사용률 3차원 /
-  SUM 단독 / PMU 비율 8종 / SoC 카운터 7종 및 그 조합.
-- 질문: "이 관측 벡터만으로 (전이 상황에서) 올바른 프리페치 설정을 골랐을 때,
-  그 계열 최적 대비 사용률 손실(regret)이 얼마인가" — 입력 세트 간 비교가 판정 대상.
-- 최종 반영: 이 평가로 SoC 카운터 관측 편입을 확정했고, SoC 7종 → 5종 축소는
-  별도의 후속 선별(후진 제거 + 구조 tie-break)으로 수행했다.
-
-## 2. 사용된 프로파일 — m33 본수집 (DCD ON)
-
-### 2.1 수집 개요
-
-| 항목 | 값 |
-|---|---|
-| 캠페인 | `m33_dcdon_20261110` (2026-11-10, DCD ON 06:33→09:31 — DCD OFF 캠페인은 09:33→11:25 별도) |
-| 빌드/보드 | DU110134 / S0BD, 시나리오 `sumb1_guc` |
-| 계열(폴드) 3종 | 14cell `guc_ltenr_14cell` / 16cell `guc_ltenr_16cell` / 18cell `guc_ltenr` |
-| 조성 | 14cell = LTE 7 + NR 7 cell(대칭, ~50% 부하 목표) · 16cell = LTE 8 + NR 8(~60%) · 18cell = LTE 9 + NR 9(원본 기준선) |
-| DCD | ON (도메인별 코어 분리 — LTE/NR 코어 그룹이 별도 존재) |
-| 블록 파일 | `out/blocks_m33_{14cell,16cell,18cell}_soc.jsonl` |
-
-### 2.2 설정(액션) 공간 — 21개, 단방향 변경
-
-한 라운드에 21개 설정을 순회한다. **한쪽 도메인의 코어만 바꾸고 다른 쪽은
-ORG 기본값(0b0011)을 유지**하는 구조다(양 도메인 동시 변경 액션은 이 수집에 없음):
-
-- `ORG` 1개 — 양쪽 모두 기본값
-- `[LTE=TC_XX, NR=ORG]` 10개 — LTE 코어만 변경 (PF_MODE 9종 TC_01~09 + PF_DIS)
-- `[LTE=ORG, NR=TC_YY]` 10개 — NR 코어만 변경 (동일 구성)
-
-PF_MODE 값 ↔ TC 번호: TC_01=0b0000, TC_02=0b0001, TC_03=0b0010, TC_04=0b0100,
-TC_05=0b0101, TC_06=0b0110, TC_07=0b0111, TC_08=0b1000, TC_09=0b1001, ORG=0b0011.
-PF_DIS는 IMP_CPUECTLR_EL1 bit 15로 프리페처 완전 비활성(TC_10으로도 표기).
-
-### 2.3 방문(표본) 구조와 전처리
-
-- 방문 = (계열, 설정그룹, round). 방문당 트레이스 블록 3개(round 1~3)가
-  방문 공통의 SoC 스냅샷 1회를 공유 → 관측은 방문 대표 블록 1개만 사용.
-- **round 1 폐기**: m33 dip(방문별 mth 완화/복원이 측정 경로에 있던 조건의 산물,
-  원인 미확정 — 고부하일수록 큼: 18cell 17/19설정 −10.6%p) → 정상상태 기준으로
-  round 2~3만 사용. 라벨·관측 모두 동일 적용.
-- 라벨 = 방문(그룹)의 평균 SUM 사용률(낮을수록 좋음).
-- 결손: 전송 중단 tar 2개(14cell TC_04_NR·18cell TC_07_LTE) — 해당 설정은 R=2 처리.
-- 재생 잡음(계열×설정 방문 간 사용량 sd 중앙값): **DCD ON 0.404%p** /
-  DCD OFF 0.228%p — 판정 문턱의 분모.
-- 유효 표본 수: DCD ON n=124 방문(3계열 × 21그룹 × 2라운드 − 결손).
-
-### 2.4 계열별 최적 설정 (평가의 기준점)
-
-21개 방문의 평균 SUM 사용률 argmin(round 2~3):
-
-| 계열 | ORG 사용률 | 계열 최적 설정 | 최적 시 사용률 | ORG 대비 개선 |
-|---|---|---|---|---|
-| 14cell | 52.76% | **TC_08_LTE** (LTE만 0b1000) | 51.165% | −1.595%p |
-| 16cell | 62.00% | **TC_05_NR** (NR만 0b0101) | 58.051% | −3.946%p |
-| 18cell | 75.23% | **TC_07_NR** (NR만 0b0111) | 70.374% | −4.859%p |
-
-도메인(코어 그룹)별로 분리한 최적 — 세 계열 모두 LTE≠NR로 상이:
-
-| 계열 | LTE 그룹 타깃 최적 | NR 그룹 타깃 최적 |
-|---|---|---|
-| 14cell | TC_08 (0b1000) 51.165% | TC_04 (0b0100) 51.371% |
-| 16cell | TC_08 (0b1000) 61.635% | TC_05 (0b0101) 58.051% |
-| 18cell | TC_05 (0b0101) 70.810% | TC_07 (0b0111) 70.374% |
-
-참고: 14cell의 NR 타깃 상위권(TC_04/07/08) 격차는 0.2~0.3%p로 재생 잡음 이내
-사실상 동률. 16·18cell은 같은 PF_MODE 값을 걸어도 적용 도메인에 따라 최대
-4.2%p까지 벌어진다(16cell 0b0101: NR 58.051 vs LTE 62.239).
-
-## 3. 평가 프로토콜 — LOFO + 1-NN + regret
-
-### 3.1 절차(의사코드)
+## 1. 블록 다이어그램 (컴파일 단위)
 
 ```
-for 대상 계열 s의 각 방문 i:                # 예: 16cell의 TC_05_NR 방문
-    z_i = 관측 벡터(입력 세트별)             # §3.2
-    풀   = s 제외한 타 계열의 모든 방문 벡터  # LOFO(폴드=계열)
-    j*   = 풀 중 z-score 표준화 유클리드 최근접   # 1-NN
-    ns   = j*가 속한 계열
-    추천 = ns의 계열 최적 설정(usage_mean argmin)  # (config, target) 1개
-    regret = s에서 추천 설정의 사용률 − s의 계열 최적 사용률  [%p]
+[빌드 타임 — 정적 구조]                        [런타임 — 동적 구조]
+
+┌──────────────────┐   MacCpuOptIpc.h      ┌──────────────────────┐
+│  sumb1_guc.ocn    │◄─────────────────────►│ mac_cpu_opt_inference │
+│  (SUMB 본체)      │  SystemRegConfig.h    │ (외부 추론 엔진, C)    │
+└───────┬───────────┘  (공유 헤더 = 포맷·인코딩 단일 원천)           │
+        │              preprocess.c (학습-서빙 공통 전처리)          │
+        │                                                ┌──────────┴──────────┐
+        │                                                ▼                     ▼
+        │                          [추론 모드: 1초 폴링 폐루프]   [수집 모드: --collect 캠페인]
+        │                                                │                     │
+        │         pmu_snapshot (W→R)                      │                     │ xlog 파이프
+        ├──────────────────────────────────────────────►(파일)                 │ (popen, "sumb; prefetch_write N")
+        │         inference_result (R←W)                 │                     │ + tad_dss_snapshot.sh
+        ◄───────────────────────────────────────────────(파일)                 ▼
+        │                                                                       [SoC CSR 직접 판독]
+        │  /dev/sysreg ioctl (prefetch 레지스터 쓰기)                                 │
+        ▼                                                                       │
+┌──────────────────┐                                                            │
+│  sysreg_kmod.ko   │  ← 카드 리부팅 시 재탑재 필요(Env/)                          │
+│  (커널 모듈)      │                                                            │
+└──────────────────┘                                                            ▼
+                                                                   ┌──────────────────────┐
+[보드 밖 — 호스트 PC]                                               │ visits_*.jsonl (보드) │
+┌─────────────────────────────────────────┐                        └──────────┬───────────┘
+│ Python 학습 파이프라인                     │◄──── 파일 다운로드(회수 최우선) ────────┘
+│ scripts_v2 (오케스트레이션 스펙/변환)      │
+│ MacCpuOpt_Model (label/train/select)     │── 가중치 export ──► model.c 교체 후 재빌드
+└─────────────────────────────────────────┘
 ```
 
-핵심 구조:
+## 2. 블록별 정의
 
-- **1-NN이 식별하는 것은 계열(부하 지점)** 이지 개별 방문이 아니다. 추천은
-  이웃 계열의 최적 설정 1개(정적 적용) — "관측 1회 → 부하 매칭 → 그 부하의
-  최적 적용"인 1회 식별 룩업 아키텍처와 동일 구조.
-- **regret은 전이(transfer)에서만 측정** — 학습 풀에 대상 계열 자신이 없으므로
-  "관측이 다른 부하의 경험에서 현재 부하로 전이되는가"를 측정한다.
-
-### 3.2 관측 벡터(입력 세트)
-
-| 입력 세트 | 구성 |
-|---|---|
-| `set` (setting-only) | 설정 인코딩 5차원: [PF_MODE 하위레벨/3, 상위레벨/3, PF_DIS, LTE 적용, NR 적용] |
-| `usage` | 사용률 3차원: [SUM 사용률(%), LTE/SUM, NR/SUM] |
-| `sum` | SUM 사용률 1차원 |
-| `+pmu` | + PMU 비율 8차원 (L2TLB·L1D refill율, LL 미스율, outer 비중, 메모리 스톨/cycle, BUS_RD/WR 비중, IPC) |
-| `+soc` | + SoC 7차원 (REQ_OCC/s, DSS_RD/REQ, HIT/ALLOC, IFB/REQ, retry/REQ, DSS_rd/s, rd/wr) |
-
-설정 인코딩의 PF_MODE 레벨은 `pf_mode_levels` [하위, 상위]를 3으로 나눈 값
-(ORG 0b0011=[0,3], TC_08 0b1000=[2,0], TC_05 0b0101=[1,1], TC_07 0b0111=[1,3]).
-PF_DIS 방문은 레벨을 ORG값으로 두고 PF_DIS 비트=1.
-
-### 3.3 setting-only가 대조 기준선인 이유
-
-setting-only 벡터는 **계열 불변**이다 — 14cell의 TC_05_NR 방문과 18cell의
-TC_05_NR 방문의 관측값이 동일하여 1-NN이 부하(계열)를 구별할 정보가 없다.
-최근접 이웃은 사실상 "같은 설정을 적용한 타 계열 방문"(거리 0, 타이는 argmin
-순서로 결정)이고 추천은 그 계열의 최적이므로 성과는 순수히 계열 최적 간
-우연 일치에 좌우된다. 관측(usage/SOC)을 더했을 때 regret이 이 기준선 대비
-개선되는지 = "관측이 부하를 식별하는가"의 측정이 된다.
-
-### 3.4 최적 선택률(opt_rate) 0%의 의미
-
-계열 LOO 구조에서 추천(이웃 계열 최적)이 대상 계열 최적과 같아지려면 두 계열의
-argmin 그룹이 동일해야 하는데, 세 계열의 최적(§2.4)이 전부 다르므로 opt_rate=0는
-구조적 필연이지 식별 실패의 증거가 아니다. 성과 비교는 regret 크기로 한다.
-
-## 4. 결과 요약 (DCD ON 3계열, n=124, 재생 잡음 0.404%p)
-
-| 입력 세트 | regret 평균(%p) | 비고 |
+| 블록 | 산출물 | 비고 |
 |---|---|---|
-| `set` (setting-only) | 2.572 | 대조 기준선 |
-| `usage3+set` | 1.809 | 사용률 기반 |
-| `sum+set` | 1.673 | SUM 단독 |
-| `soc7` (SoC만) | 1.415 | 설정 인코딩 없이도 우위 |
-| **`soc7+set`** | **1.279** | **SoC-only 최적 조합** |
-| `usage3+soc+set` | 1.333 | 조합 |
-| `sum+soc+set` | 1.320 | soc7+set과 사실상 동률(랩 공선) |
+| **SUMB 본체** | `sumb1_guc.ocn(.gz)` — 프리셋 `gnbdu-guc-ltenr-cpu1` 크로스 빌드 | 수집 에이전트(MacCpuOptAgent)·트리거 소비·레지스터 적용·aitune CLI 내장 |
+| **추론 엔진** | `mac_cpu_opt_inference` — 독립 CMake 빌드(같은 컨테이너·툴체인) | 이중 모드: 추론 폴링 / `--collect` 캠페인 오케스트레이터 |
+| **커널 모듈** | `sysreg_kmod.ko` + `sysreg_cli` (Env/ 배포 자산) | 재부팅 후 수동 재탑재 필요 — 모듈 없으면 prefetch_write 전량 실패 |
+| **학습 파이프라인** | Python (스크립트, 보드 외 호스트 실행) | 바이너리 아님 — 빌드 산출물이 아니라 가중치·데이터 처리 계열 |
 
-단일 특징 standalone(설정 인코딩 포함): rd/wr 1.138 < DSS_rd/s 1.279 <
-DSS_RD/REQ 1.386 < HIT/ALLOC 1.442 < REQ_OCC/s 1.605 < retry/REQ 1.768 < IFB/REQ 2.023.
+## 3. 정적 구조 (컴파일 타임 결합)
 
-해석:
+| 결합 | 내용 | 효과 |
+|---|---|---|
+| `MacCpuOptIpc.h` | SUMB ↔ inference 양쪽이 **같은 헤더 include** | IPC 파일 포맷(96B/104B)이 어긋날 수 없음. `_Static_assert`가 양측 빌드에서 크기·오프셋 강제. 포맷 변경 시 헤더만 수정 + 양쪽 재빌드 |
+| `SystemRegConfig.h` | inference가 직접 include | isolated 코어 범위·prefetch setting 인코딩(0~10) 단일 원천 |
+| `preprocess.c` | inference 빌드 + 학습 파이프라인이 동일 C 소스 공유 | 학습-서빙 전처리 skew 원천 제거 (golden_test로 비트 일치 검증) |
+| sysreg_kmod.ko | 완전 독립 빌드 | SUMB 빌드와 무관. 인터페이스는 `/dev/sysreg` ioctl ABI만 |
 
-- **SoC-only(soc7+set 1.279)가 사용률 기반(sum+set 1.673·usage3+set 1.809)보다
-  우위** — 랩에서 SoC 카운터가 사용률 이상의 정보(트래픽 대리 + 설정·조성 상태)를 보유.
-- SoC+SUM(1.320)과 동률인 것은 랩의 SUM↔SoC 완전 공선(rho=1.00) 환경 산물 —
-  라벨/조성의 사용량 축이 SoC에 재현되기 때문.
-- DCD OFF 3계열(14/16/18cell, 최적 TC_07/08/09)에서는 어떤 SoC 조합도
-  setting-only(0.928%p)에 미달 — DCD OFF에서는 관측의 의사결정 기여가 0.
-  (이 선별은 DCD ON 체제의 관측 구성 결정에 사용됐다.)
+→ 4개 바이너리 중 **링크 타임 의존은 전혀 없고**, 결합은 헤더 3개(포맷·인코딩·전처리)가 전부. 나머지는 전부 런타임 계약.
 
-## 5. 한계·주의사항
+## 4. 동적 구조 (런타임 인터페이스)
 
-1. **랩 에뮬레이션의 공선** — L1 PHY(#12~17)가 미구동이라 메모리 트래픽이
-   SUMB 코어에서만 발생 → SUM 사용률↔SoC 완전 공선. "SoC가 사용률과 동등
-   이상"이라는 결과는 이 체제의 산물이며 필드 가치 검증은 불가(재판정 조건).
-2. **추천은 계열 단위 정적 라벨** — 1-NN이 방문이 아니라 계열을 식별하고 그
-   계열의 최적을 걸어준다. 방문 단위 적응(비-ORG 시점 관측 등)은 별도 평가.
-3. **액션 공간이 단방향 21개** — 두 도메인을 동시에 바꾸는 액션은 이 데이터로
-   평가 불가(동시 변경은 별도 cross 격자 수집에서 다룸).
-4. **round 1 폐기 규칙은 m33 측정 경로 교란 조건의 산물** — 신규 캠페인은 먼저
-   round 1 편차를 확인한 뒤 폐기 여부를 결정해야 한다.
-5. 14cell NR 타깃 상위권 설정 격차는 재생 잡음 이내 — "14cell NR 최적=TC_04"는
-   동률로 읽어야 한다.
+| 경로 | 방향 | 매체 | 성격 |
+|---|---|---|---|
+| pmu_snapshot | SUMB **W** → inference **R** | tmpfs 파일, write+rename 원자 교체, seq 폴링 | **느슨한 결합** — inference가 죽어도 SUMB 무영향 |
+| inference_result | inference **W** → SUMB **R** | tmpfs 파일, lease(5s) 신선도 판정 | 모델 사망 시 lease 만료 → 기본값 복귀 (안전망) |
+| prefetch 레지스터 쓰기 | SUMB → sysreg_kmod | `/dev/sysreg` ioctl | **유일한 ioctl 경로**. 전 코어 동시 쓰기는 kernel hang → 직렬화(1코어/2초) |
+| 설정 기입(수집 모드) | inference → SUMB | xlog stdin 파이프 (`popen`, `sumb; prefetch_write N` CLI) | 캠페인 모드 전용 — 제어 채널이 파일이 아닌 **콘솔 CLI** |
+| SoC 카운터(TAD/DSS) | inference → 하드웨어 | `tad_dss_snapshot.sh` 실행 (CSR 직접 판독) | SUMB 경유 없음 — 수집 경로 일원화 |
+| 학습 데이터 | 보드 → 호스트 | visits JSONL 파일 다운로드 | 오프라인. 회수 최우선(재부팅 시 소실) |
 
-## 6. 산출물·코드 위치
+## 5. SUMB ↔ 추론 엔진 전달 메커니즘 (상세)
 
-- 평가 구현: `select/soc_ablation_m33.py` (`selection_regret`, `setting_enc`,
-  `load_series`), `select/soc_standalone_selection.py` (입력 세트별·전진/후진 선택)
-- 데이터: `out/blocks_m33_{14cell,16cell,18cell}_soc.jsonl` (본수집 블록),
-  DCD OFF 대응 `out/blocks_m33_dcdoff_{14,16,18}cell_soc.jsonl`
-- 결과: `select/results/soc_standalone_selection.json`,
-  `select/results/soc_ablation_m33.json`
-- 재현: `python3 select/soc_standalone_selection.py --series 14cell=... --series 16cell=... --series 18cell=...`
+두 프로세스 사이에 소켓, 파이프, 시그널 같은 별도 통신 채널은 없다. 유일한 매체는 tmpfs 파일 2개이고, **파일 갱신 자체가 트리거**다.
 
-이 평가로 "관측 구성 = SUM 사용률 + 그룹별 코어 수 + SoC 카운터" 방향이 확정됐고,
-SoC 7종 → 5종 축소(rd/wr, REQ_OCC/s, DSS_RD/REQ, HIT/ALLOC, IFB/REQ 유지)는
-후속 선별 단계(후진 제거 + 구조 tie-break)의 결정이다.
+### 5.1 SUMB → 추론 엔진 (pmu_snapshot, 96B)
+
+```
+SUMB SystemProcedureThread (LNX 타이머, 1초)          추론 엔진
+────────────────────────────────────                  ──────────
+① 임시 파일에 write
+② rename(tmp, pmu_snapshot)  ── 원자 교체 ──►          ③ 1초 폴링으로 파일 열어 seq 확인
+                                                       ④ seq 변화 시 → 새 데이터로 추론 수행
+```
+
+- **원자성**: `write()+rename()` 조합. rename이 같은 파일시스템 내 경로 교체를 원자적으로 수행하므로 추론 엔진이 쓰다 만 "반쪽 파일"을 읽는 일이 구조적으로 불가능 — 잠금·핸드셰이크 프로토콜 불필요.
+- **변화 감지 = 트리거**: 헤더의 `seq`가 갱신마다 +1. 추론 엔진은 매초 파일을 읽어 seq 변화를 보고 변했을 때만 추론. "새 데이터 있음" 신호를 별도로 보내지 않고 **seq 변화가 곧 신호**.
+
+### 5.2 추론 엔진 → SUMB (inference_result, 104B)
+
+```
+추론 엔진                                               SUMB SystemProcedureThread (다음 1초 틱)
+──────────                                              ─────────────────────────────────
+① 임시 파일에 결과 write (setting[12], timestamp_ns,    ③ 매 틱 파일 판독
+   lease_ms)                                            ④ 검증: magic/version/seq
+② rename() 원자 기록 ─────────────────────────────►     ⑤ 신선도 판정: now − timestamp_ns ≤ lease_ms
+                                                        ⑥ ACTIVE면 setting을 트리거 슬롯에 arm
+```
+
+- **역방향도 동일 원리**: SUMB가 결과 파일을 1초마다 폴링해 판독. 추론 엔진이 완료를 능동적으로 알리지 않고 SUMB가 다음 틱에 스스로 발견.
+- **lease = 사망 감지 신호**: `timestamp_ns`가 lease_ms(기본 5초)보다 오래됐으면 결과 폐기, ACTIVE 모드면 부팅 기본값(ON + PF_MODE 3 = setting 4) 복귀 요청. 추론 엔진이 죽어도 별도 에러 통지 없이 lease 만료만으로 장애 감지.
+- **데이터는 파일, 실행은 별도 경로**: 결과 파일로 전달되는 것은 setting 값뿐. 실제 레지스터 적용은 SUMB 내부 2단계 경로(LNX 타이머 arm → 각 isolated 코어가 `RwPoll()`에서 소비 → `/dev/sysreg` ioctl)로 수행 — 파일이 제어 신호를 직접 실행하지 않음.
+
+### 5.3 설계 의도
+
+| 특성 | 결과 |
+|---|---|
+| 느슨한 결합 | 추론 엔진이 죽어도 SUMB에 무영향 — 수집 계속. 반대로 SUMB 재기동 시 엔진은 파일 없음/seq 정지만 보고 조용히 대기 |
+| 생존자 문제 해소 | 어느 쪽이 먼저 떠도 동작 — 파일 없으면 스킵, 생기면 소비 |
+| 예외: 캠페인 수집 모드 | 역방향 **제어 채널** 별도 — 추론 엔진이 xlog 콘솔 stdin 파이프로 `sumb; prefetch_write N` CLI를 보내 SUMB에 설정 기입. 일반 운용 폐루프에서는 미사용(랩 전용) |
+
+## 6. 요약
+
+정적으로는 공유 헤더 3개로만 묶인 독립 빌드 4종(SUMB / inference / kmod / Python 파이프라인),
+동적으로는 tmpfs 파일 2개(제어 데이터) + ioctl 1개(실행) + 콘솔 CLI 1개(캠페인 제어)로 통신하는 구조.
