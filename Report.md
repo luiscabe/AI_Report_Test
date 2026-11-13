@@ -481,7 +481,3 @@ cd select && MAC_CPU_OPT_MODEL=../../evidence/train_model_final_20261113_5c/fina
 - 런타임 탑재 전제: 엔진(`MacCpuOpt_Inference`, C)의 모델 교체 지점에
   `model_weights.h` 연결 — 관측 조립·후보 열거·argmin·적용은 엔진 측
   로직, **OOD 방어도 엔진 측 담당**(모델은 표준화만 수행).
-
-
-
-
